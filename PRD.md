@@ -1,5 +1,5 @@
 # Product Requirements Document: Leads Support AI Agent
-**Version:** 4.2 (OpenAI Realtime API & WebSocket Implementation)
+**Version:** 4.3 (Enhanced OpenAI Realtime API & WebSocket Implementation)
 **Date:** December 2024
 **Project Owner:** Sonia
 **Author:** AI Assistant (in collaboration with Sonia)
@@ -7,20 +7,20 @@
 ## 1. Introduction
 
 ### 1.1. Purpose of this Document
-This document defines the product requirements, features, and strategic vision for the "Leads Support AI Agent" (hereinafter "the Agent"). It details the **Advanced Voice-Enabled Multi-Channel Platform** that has evolved from the original MVP to include comprehensive voice calling capabilities with **OpenAI Realtime API integration**, bidirectional audio streaming via WebSocket architecture, sophisticated Redis-powered session management, advanced health monitoring, and enhanced emergency handling. The system is currently deployed and operational with both chat and voice functionalities.
+This document defines the product requirements, features, and strategic vision for the "Leads Support AI Agent" (hereinafter "the Agent"). It details the **Advanced Voice-Enabled Multi-Channel Platform** that has evolved from the original MVP to include comprehensive voice calling capabilities with **Enhanced OpenAI Realtime API integration**, bidirectional audio streaming via WebSocket architecture, sophisticated Redis-powered session management, advanced health monitoring, and enhanced emergency handling. The system features improved CallSid handling, async voice processing, and optimized Voice Activity Detection for natural conversation flow.
 
 ### 1.2. Project Vision
 To empower Small to Medium-Sized Businesses (SMBs) with an intelligent, **multi-channel AI platform** that seamlessly handles both chat and voice interactions. The Agent provides 24/7 availability across communication channels, sophisticated emergency detection and response, plan-based access to advanced features that scale with business needs, and comprehensive analytics powered by advanced session management and health monitoring systems.
 
 ### 1.3. Product Goals
 
-#### Current Implementation (V4.2 - Fully Deployed with Realtime API Features)
-* **OpenAI Realtime API Platform:** Complete integration with bidirectional audio streaming, real-time speech-to-speech processing, and WebSocket architecture
-* **WebSocket Infrastructure:** Low-latency audio bridge between Twilio Media Streams and OpenAI Realtime API with intelligent connection management
-* **Voice Activity Detection:** Server-side VAD with configurable thresholds, interruption handling, and natural conversation flow
-* **Sophisticated Session Management:** Redis-powered session storage with WebSocket tracking, intelligent in-memory fallback, and comprehensive analytics
-* **Enhanced Health Monitoring:** Real-time system health tracking with WebSocket metrics, Redis connectivity monitoring, and automated cleanup systems
-* **Intelligent Memory Management:** Automated session cleanup, WebSocket connection monitoring, and configurable resource limits with production-ready monitoring
+#### Current Implementation (V4.3 - Enhanced Realtime API Features)
+* **Enhanced OpenAI Realtime API Platform:** Complete integration with bidirectional audio streaming, improved CallSid extraction from Twilio start messages, and optimized VAD settings
+* **Advanced WebSocket Infrastructure:** Low-latency audio bridge with audio queue management, temporary connection tracking, and reliable CallSid association
+* **Optimized Voice Activity Detection:** Server-side VAD with refined thresholds (0.5), increased silence duration (2.5s), and natural conversation flow
+* **Asynchronous Voice Processing:** Non-blocking AI response generation with background processing, thinking sounds, and improved perceived responsiveness
+* **Enhanced Connection Management:** Audio queue for buffering during connection establishment, temporary connection tracking, and CallSid callback mechanism
+* **Business-Specific Emergency Handling:** Dynamic emergency instructions based on business configuration with improved detection and routing
 
 #### Achieved Advanced Features
 * **Realtime Voice Processing:**
@@ -74,7 +74,7 @@ Primary users are Small to Medium-Sized Businesses (SMBs) in service-oriented in
 * **Service Contractors:** Landscapers, roofers, contractors requiring multi-channel communication
 
 ### 1.5. Scope
-* **In Scope (Current V4.2 Implementation):** OpenAI Realtime API integration, WebSocket architecture, plan tier system, enhanced emergency handling, Redis session management with WebSocket tracking, advanced analytics
+* **In Scope (Current V4.3 Implementation):** Enhanced OpenAI Realtime API integration, WebSocket architecture, plan tier system, enhanced emergency handling, Redis session management with WebSocket tracking, advanced analytics
 * **Phase 1 Future Development:** CRM integrations, enhanced Realtime API features, mobile applications
 * **Phase 2 Future Development:** Self-service SaaS platform, automated billing, advanced AI capabilities
 
@@ -120,17 +120,36 @@ SMBs lose significant business opportunities due to inability to handle immediat
 
 ### 4.1. Advanced Voice Agent System (Premium Implementation)
 
-#### Premium Voice Infrastructure
-* **OpenAI TTS Primary Integration:** 
-  - **High-Quality Voice Models**: nova (default), alloy (professional), onyx (male), shimmer (energetic), echo (balanced), fable (expressive)
-  - **Dynamic Audio Generation**: Real-time MP3 generation with temporary file management and automatic cleanup
-  - **Intelligent Quality Selection**: Voice model selection based on plan tier and business configuration
-  - **Fallback Architecture**: Seamless fallback to Twilio TTS with SSML enhancement when OpenAI services are unavailable
-* **Advanced SSML Processing Pipeline:**
-  - **Natural Conversation Flow**: Conversational interjections ("Got it," "Alright," "Perfect"), context-appropriate pauses
-  - **Intelligent Emphasis**: Dynamic emphasis for important information and emergency situations
-  - **Voice-Optimized Prompts**: Specialized system prompts designed specifically for voice interactions
-  - **Response Cleaning**: Aggressive post-processing to ensure clean speech output with comprehensive prefix removal
+#### Enhanced Realtime API Integration
+* **OpenAI Realtime API with Enhanced Features:** 
+  - **Reliable CallSid Extraction**: CallSid obtained from Twilio start message parameters (more reliable than URL-based methods)
+  - **Audio Queue Management**: Buffering system for audio chunks during connection establishment
+  - **Connection State Tracking**: Comprehensive state management with `isTwilioReady`, `isAiReady`, and audio queue
+  - **Async Voice Processing**: Non-blocking AI response generation with background processing
+  - **Optimized VAD Settings**: Threshold: 0.5, Silence Duration: 2.5s for natural conversation flow
+* **Advanced Error Handling:**
+  - **Expected Error Filtering**: Intelligent handling of operational messages (`input_audio_buffer_commit_empty`, `response_cancel_not_active`)
+  - **Graceful Error Recovery**: User-friendly error messages with fallback TwiML responses
+  - **Connection Resilience**: Automatic cleanup and reconnection strategies
+* **Improved WebSocket Architecture:**
+  - **Temporary Connection Management**: Track connections before CallSid is available
+  - **CallSid Callback System**: onCallSidReceived callback for proper connection association
+  - **Enhanced Connection Lifecycle**: Better handling of connection states and transitions
+
+#### Enhanced Voice Processing Pipeline
+* **Asynchronous Speech Handling:**
+  - **Immediate Response**: Thinking sounds played while AI processes in background
+  - **Background AI Processing**: Non-blocking response generation
+  - **Dynamic Call Redirection**: Twilio REST API used to update live calls
+  - **Multiple Processing Endpoints**: `/handle-speech`, `/play-and-gather`, `/continue-conversation`
+* **Audio Generation & Delivery:**
+  - **Pre-generated Audio URLs**: Audio generated in background and delivered via URL
+  - **Fallback Mechanisms**: Graceful fallback to Twilio TTS when OpenAI TTS unavailable
+  - **Thinking Sound Library**: Multiple thinking sounds for variety
+* **Connection Management:**
+  - **Audio Queue Processing**: Buffered audio processing when connections are ready
+  - **Mark Messages**: Keep-alive messages to maintain stream integrity
+  - **State-Based Processing**: Only process audio when both connections are ready
 
 #### Enterprise Session Management
 * **Redis-Powered Architecture:**
@@ -213,6 +232,7 @@ SMBs lose significant business opportunities due to inability to handle immediat
 * **Intent Classification:** Advanced emergency keyword detection with context analysis
 * **Priority Scoring:** Automatic priority assignment (LOW, NORMAL, HIGH, URGENT)
 * **Essential Question Flagging:** `isEssentialForEmergency` database field for streamlined flows
+* **Business-Specific Instructions:** Dynamic emergency protocols based on business configuration
 
 #### Emergency Response System
 * **Immediate Voice Alerts (PRO):** SSML-enhanced phone calls to business owners
@@ -228,6 +248,7 @@ SMBs lose significant business opportunities due to inability to handle immediat
 * **Health Monitoring:** Continuous Redis health checks with exponential backoff and connection status tracking
 * **Session Cleanup:** Automatic session expiration, memory optimization, and resource management
 * **Memory Monitoring:** Optional verbose logging and memory usage tracking for production debugging
+* **WebSocket Session Tracking:** Integration with temporary connection management and CallSid association
 
 #### Enhanced Voice Session Service
 * **Comprehensive Session Tracking:** Advanced conversation history with timestamp precision and metadata
@@ -276,28 +297,28 @@ SMBs lose significant business opportunities due to inability to handle immediat
 
 ### 4.7. Advanced System Architecture (Production-Ready)
 
-#### Memory Management & Optimization
-* **Intelligent Resource Management:**
-  - **Configurable Limits**: MAX_IN_MEMORY_SESSIONS (100), SESSION_TIMEOUT (30 minutes), MAX_MEMORY_USAGE (1536MB)
-  - **Automated Cleanup**: Regular session cleanup with configurable intervals and memory optimization
-  - **Memory Monitoring**: Optional detailed memory tracking with configurable logging levels
-  - **Performance Optimization**: Conversation history limits, session bounds enforcement, and efficient cleanup algorithms
+#### Enhanced Voice Processing Architecture
+* **Asynchronous Processing Pipeline:**
+  - **Non-blocking Operations**: Background AI processing with immediate user feedback
+  - **Thinking Sounds**: Audio feedback while processing to improve perceived responsiveness
+  - **Dynamic Call Updates**: Twilio REST API integration for live call redirection
+  - **Multiple Processing Stages**: Distributed processing across multiple endpoints
 
-#### Enhanced Error Handling & Resilience
-* **Redis Connection Management:**
-  - **Smart Reconnection**: Exponential backoff with maximum retry limits and connection state tracking
-  - **Graceful Degradation**: Seamless fallback to in-memory storage with full feature preservation
-  - **Health Monitoring**: Continuous connectivity checks with intelligent backoff and status reporting
-  - **Resource Cleanup**: Proper connection cleanup and graceful shutdown handling
+#### Connection State Management
+* **Enhanced State Tracking:**
+  - **Connection States**: `isTwilioReady`, `isAiReady`, `streamSid`, `audioQueue`
+  - **Temporary Connections**: Management before CallSid is available
+  - **Audio Queue**: Buffering system for audio during connection establishment
+  - **CallSid Association**: Callback mechanism for proper connection tracking
 
-#### Advanced Audio Processing
-* **OpenAI TTS Integration:**
-  - **Voice Model Selection**: Dynamic selection based on business configuration and plan tier
-  - **Audio File Management**: Temporary file generation with automatic cleanup and security validation
-  - **Quality Optimization**: High-quality MP3 generation with optimized settings for voice calls
-  - **Error Handling**: Comprehensive fallback systems with detailed error logging and recovery
+#### Optimized Voice Activity Detection
+* **Natural Conversation Settings:**
+  - **Threshold**: 0.5 (optimized from 0.6 for better sensitivity)
+  - **Silence Duration**: 2500ms (increased from 500ms for natural pauses)
+  - **Prefix Padding**: 500ms (increased from 300ms for speech capture)
+  - **Business Context**: Dynamic instructions based on business configuration
 
-## 5. Technical Architecture Overview (Current V4.1)
+## 5. Technical Architecture Overview (Current V4.3)
 
 ### 5.1. Core Infrastructure
 * **Containerized Application:** Docker-based deployment with multi-service architecture and health monitoring
@@ -306,17 +327,17 @@ SMBs lose significant business opportunities due to inability to handle immediat
   - **Primary:** Redis with robust connection management, automatic reconnection, and health monitoring
   - **Intelligent Fallback:** In-memory session storage with automatic cleanup and memory optimization
   - **Session Service:** Enhanced VoiceSessionService with comprehensive analytics and entity extraction
-* **Voice Infrastructure:** Twilio Voice API with webhook handling and OpenAI TTS integration
+* **Voice Infrastructure:** Twilio Voice API with Media Streams, webhook handling, and OpenAI Realtime API integration
 
 ### 5.2. AI & Voice Processing
 * **OpenAI Integration:** 
-  - **Conversation AI:** GPT-4 for intelligent conversations with voice-optimized prompts
+  - **Realtime API:** Enhanced `gpt-4o-realtime-preview` with optimized VAD settings
   - **Speech Recognition:** Whisper for high-accuracy transcription with noise filtering
-  - **Advanced TTS:** OpenAI voice models (nova, alloy, onyx, etc.) with dynamic audio generation
-  - **Embeddings:** text-embedding-3-small for RAG-based knowledge retrieval
-* **Enhanced SSML Processing:** Advanced speech synthesis with natural language patterns, conversational flow, and intelligent emphasis
+  - **Connection Management:** Audio queue and state tracking for reliable streaming
+  - **Error Handling:** Intelligent filtering of expected operational messages
+* **Asynchronous Processing:** Non-blocking AI response generation with background audio creation
 * **Entity Extraction:** Advanced NLP for real-time contact information and intent classification with confidence scoring
-* **Voice Optimization:** Specialized prompts and processing for voice interactions with dynamic action determination
+* **Voice Optimization:** Business-specific prompts and emergency detection with dynamic instruction generation
 
 ### 5.3. API Architecture & Session Management
 * **RESTful Design:** Express.js-based API with comprehensive error handling and plan-aware middleware
@@ -337,6 +358,7 @@ SMBs lose significant business opportunities due to inability to handle immediat
   - **Multi-Language Expansion**: Additional language support with native voice models
   - **Contextual Voice Adaptation**: Dynamic voice characteristics based on conversation context and customer sentiment
   - **Advanced SSML**: Enhanced markup for even more natural conversations with emotion and tone control
+  - **Real-time Sentiment Analysis**: Adjust conversation style based on caller emotion
 
 ### 6.2. Enterprise Session Management
 * **Advanced Analytics Platform:**
@@ -357,4 +379,4 @@ SMBs lose significant business opportunities due to inability to handle immediat
 * **Offline Capability:** Basic functionality during connectivity issues
 * **Advanced Analytics:** Machine learning insights for business optimization
 
-This comprehensive platform now serves as a complete multi-channel AI solution for SMBs, with sophisticated voice capabilities, intelligent emergency handling, and scalable plan-based architecture that grows with business needs. 
+This comprehensive platform now serves as a complete multi-channel AI solution for SMBs, with sophisticated voice capabilities including enhanced CallSid handling, asynchronous processing, optimized VAD settings, and intelligent emergency handling that scales with business needs. 

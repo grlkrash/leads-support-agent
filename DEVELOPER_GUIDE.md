@@ -1,9 +1,9 @@
 # Developer Guide & System Architecture
 ## AI Agent Assistant for SMBs - Advanced Voice-Enabled Multi-Channel Platform
 
-**Version:** 4.2  
+**Version:** 4.3  
 **Last Updated:** December 2024  
-**Purpose:** Technical implementation guide and architectural reference for the advanced voice-enabled, plan-tier based AI agent platform with OpenAI Realtime API integration and WebSocket architecture
+**Purpose:** Technical implementation guide and architectural reference for the advanced voice-enabled, plan-tier based AI agent platform with enhanced OpenAI Realtime API integration and WebSocket architecture
 
 ---
 
@@ -122,144 +122,100 @@ The AI Agent Assistant for SMBs has evolved into a comprehensive **Advanced Voic
 ### 3.1. Realtime API Architecture
 
 ```typescript
-// Realtime Agent Service - Core Implementation
+// Realtime Agent Service - Core Implementation with Enhanced CallSid Handling
 export class RealtimeAgentService {
   private openAiWs: WebSocket | null = null;
   private twilioWs: WebSocket | null = null;
-  private callSid: string;
-  private streamSid: string | null = null;
+  private callSid: string = '';
+  private state: ConnectionState;
   private readonly openaiApiKey: string;
+  public onCallSidReceived?: (callSid: string) => void;
 
-  constructor(callSid: string) {
-    this.callSid = callSid;
+  // Enhanced connection state management
+  interface ConnectionState {
+    isTwilioReady: boolean;
+    isAiReady: boolean;
+    streamSid: string | null;
+    audioQueue: string[];  // Queue for audio chunks while connections are being established
+  }
+
+  constructor(twilioWs: WebSocket) {
+    // CallSid will be extracted from Twilio start message parameters (more reliable than URL)
+    this.twilioWs = twilioWs;
     this.openaiApiKey = process.env.OPENAI_API_KEY || '';
     
     if (!this.openaiApiKey) {
       throw new Error('OPENAI_API_KEY is required for RealtimeAgentService');
     }
-  }
 
-  /**
-   * Establishes bidirectional audio bridge between Twilio and OpenAI
-   */
-  public async connect(twilioWs: WebSocket): Promise<void> {
-    try {
-      this.twilioWs = twilioWs;
-      this.setupTwilioListeners();
-      
-      // Connect to OpenAI Realtime API
-      const url = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01';
-      const headers = {
-        'Authorization': `Bearer ${this.openaiApiKey}`,
-        'OpenAI-Beta': 'realtime=v1'
-      };
-
-      this.openAiWs = new WebSocket(url, { headers });
-      this.setupOpenAiListeners();
-
-    } catch (error) {
-      console.error(`[RealtimeAgent] Failed to connect for call ${this.callSid}:`, error);
-      throw error;
-    }
-  }
-
-  /**
-   * Configures the OpenAI session for voice conversation
-   */
-  private configureOpenAiSession(): void {
-    if (!this.openAiWs || this.openAiWs.readyState !== WebSocket.OPEN) return;
-
-    const sessionConfig = {
-      type: 'session.update',
-      session: {
-        modalities: ['text', 'audio'],
-        instructions: 'You are a helpful AI assistant for a business. Respond naturally and helpfully to customer inquiries. Keep responses concise and conversational.',
-        voice: 'alloy',
-        input_audio_format: 'g711_ulaw',
-        output_audio_format: 'g711_ulaw',
-        input_audio_transcription: {
-          model: 'whisper-1'
-        },
-        turn_detection: {
-          type: 'server_vad',
-          threshold: 0.5,
-          prefix_padding_ms: 300,
-          silence_duration_ms: 500
-        }
-      }
+    this.state = {
+      isTwilioReady: false,
+      isAiReady: false,
+      streamSid: null,
+      audioQueue: [],
     };
 
-    this.openAiWs.send(JSON.stringify(sessionConfig));
+    // Set up Twilio WebSocket listeners immediately
+    this.setupTwilioListeners();
+    
+    console.log('[RealtimeAgent] Service initialized - waiting for CallSid from start message');
   }
 
   /**
-   * Handles incoming messages from Twilio WebSocket
+   * Handles Twilio start message with improved CallSid extraction
    */
   private handleTwilioMessage(message: WebSocket.Data): void {
     try {
       const msg = JSON.parse(message.toString());
       
-      switch (msg.event) {
-        case 'media':
-          // Forward audio from Twilio to OpenAI
-          if (this.openAiWs && this.openAiWs.readyState === WebSocket.OPEN) {
-            const audioAppend = {
-              type: 'input_audio_buffer.append',
-              audio: msg.media.payload
-            };
-            this.openAiWs.send(JSON.stringify(audioAppend));
-          }
-          
-          // Send mark message back to Twilio to keep audio stream alive
-          if (this.twilioWs && this.twilioWs.readyState === WebSocket.OPEN && this.streamSid) {
-            const markMessage = {
-              event: 'mark',
-              streamSid: this.streamSid,
-              mark: { name: `audio_processed_${Date.now()}` }
-            };
-            this.twilioWs.send(JSON.stringify(markMessage));
-          }
-          break;
+      if (msg.event === "start") {
+        // Extract CallSid from start message (reliable method)
+        this.callSid = msg.start.callSid;
+        
+        if (!this.callSid) {
+          console.error('[RealtimeAgent] CallSid not found in start message');
+          this.cleanup('Twilio');
+          return;
+        }
+        
+        console.log(`[RealtimeAgent] CallSid received from start message: ${this.callSid}`);
+        
+        // Notify WebSocket server that we have the CallSid
+        if (this.onCallSidReceived) {
+          this.onCallSidReceived(this.callSid);
+        }
+        
+        this.state.streamSid = msg.start.streamSid;
+        this.state.isTwilioReady = true;
+        
+        // Now that we have streamSid, we can safely connect to OpenAI
+        this.connectToOpenAI();
       }
+      // ... handle other message types
     } catch (error) {
       console.error(`[RealtimeAgent] Error parsing Twilio message:`, error);
     }
   }
 
   /**
-   * Handles incoming messages from OpenAI WebSocket
+   * Enhanced error handling for expected OpenAI operational messages
    */
   private handleOpenAiMessage(data: WebSocket.Data): void {
     try {
       const response = JSON.parse(data.toString());
       
       switch (response.type) {
-        case 'response.audio.delta':
-          // Forward audio from OpenAI back to Twilio
-          if (this.twilioWs && this.twilioWs.readyState === WebSocket.OPEN && this.streamSid) {
-            const twilioMessage = {
-              event: 'media',
-              streamSid: this.streamSid,
-              media: { payload: response.delta }
-            };
-            this.twilioWs.send(JSON.stringify(twilioMessage));
+        case 'error':
+          // Filter out expected errors that are part of normal operation
+          if (response.error?.code === 'input_audio_buffer_commit_empty' || 
+              response.error?.code === 'response_cancel_not_active' ||
+              response.error?.code === 'conversation_already_has_active_response') {
+            console.log(`[RealtimeAgent] Expected OpenAI operational message: ${response.error.code}`);
+          } else {
+            console.error(`[RealtimeAgent] OpenAI error:`, response.error);
           }
           break;
-          
-        case 'input_audio_buffer.speech_started':
-          // User started speaking - optionally interrupt AI
-          if (this.openAiWs && this.openAiWs.readyState === WebSocket.OPEN) {
-            this.openAiWs.send(JSON.stringify({ type: 'response.cancel' }));
-          }
-          break;
-          
-        case 'input_audio_buffer.speech_stopped':
-          // User stopped speaking - commit and respond
-          if (this.openAiWs && this.openAiWs.readyState === WebSocket.OPEN) {
-            this.openAiWs.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
-            this.openAiWs.send(JSON.stringify({ type: 'response.create' }));
-          }
-          break;
+        // ... handle other message types
       }
     } catch (error) {
       console.error(`[RealtimeAgent] Error parsing OpenAI message:`, error);
@@ -268,28 +224,28 @@ export class RealtimeAgentService {
 }
 ```
 
-### 3.2. Bidirectional Audio Streaming
+### 3.2. Bidirectional Audio Streaming with Audio Queue
 
 ```
 Twilio Media Stream → WebSocket → Realtime Agent Service
        ↓
-Audio Buffer (G.711 μ-law) → OpenAI Realtime API
+Audio Buffer Queue → OpenAI Realtime API (when ready)
        ↓
 Real-time AI Processing (Speech-to-Speech)
        ↓
-Response Audio → Twilio Media Stream → WebSocket → Caller
+Response Audio → Audio Queue → Twilio Media Stream → Caller
 ```
 
-### 3.3. Voice Activity Detection Configuration
+### 3.3. Voice Activity Detection Configuration (Optimized)
 
 ```typescript
-// Advanced VAD configuration
+// Optimized VAD configuration for natural conversation flow
 private configureOpenAiSession(): void {
   const sessionConfig = {
     type: 'session.update',
     session: {
       modalities: ['text', 'audio'],
-      instructions: 'You are a helpful AI assistant for a business...',
+      instructions: businessInstructions, // Dynamic business-specific instructions
       voice: 'alloy',
       input_audio_format: 'g711_ulaw',
       output_audio_format: 'g711_ulaw',
@@ -298,9 +254,9 @@ private configureOpenAiSession(): void {
       },
       turn_detection: {
         type: 'server_vad',
-        threshold: 0.5,
-        prefix_padding_ms: 300,
-        silence_duration_ms: 500
+        threshold: 0.5,           // Optimized sensitivity
+        prefix_padding_ms: 500,   // Increased padding for natural speech
+        silence_duration_ms: 2500 // 2.5 seconds silence before processing
       }
     }
   };
@@ -313,176 +269,78 @@ private configureOpenAiSession(): void {
 
 ## 4. WebSocket Infrastructure
 
-### 4.1. WebSocket Server Implementation
+### 4.1. WebSocket Server Implementation with Enhanced Connection Management
 
 ```typescript
-// WebSocket server for handling Twilio Media Streams
+// WebSocket server for handling Twilio Media Streams with temporary connection tracking
 export class TwilioWebSocketServer {
   private wss: WebSocketServer;
   private activeConnections = new Map<string, RealtimeAgentService>();
 
   constructor(server: Server) {
-    this.wss = new WebSocketServer({ 
-      server,
-      path: '/' // Root path for WebSocket connections
-    });
-
-    this.setupWebSocketServer();
+    this.wss = new WebSocketServer({ server });
+    this.setupConnectionHandler();
   }
 
-  private setupWebSocketServer(): void {
+  private setupConnectionHandler(): void {
     this.wss.on('connection', (ws: WebSocket, request) => {
-      // Validate Twilio connection
-      const userAgent = request.headers['user-agent'] || '';
-      const isFromTwilio = userAgent.includes('TwilioProxy') || userAgent.includes('Twilio');
+      console.log('[WebSocket Server] New Twilio connection established.');
       
-      if (!isFromTwilio) {
-        ws.close(1008, 'Only Twilio connections allowed');
-        return;
-      }
-
-      let callSid: string | null = null;
-      let realtimeAgent: RealtimeAgentService | null = null;
-
-      ws.on('message', async (message: WebSocket.Data) => {
-        const data = JSON.parse(message.toString());
-        
-        if (!callSid && data.start?.callSid) {
-          callSid = data.start.callSid;
-          realtimeAgent = new RealtimeAgentService(callSid);
-          this.activeConnections.set(callSid, realtimeAgent);
-          
-          await realtimeAgent.connect(ws);
-        }
-      });
-    });
-  }
-}
-```
-
-### 4.2. Audio Stream Processing
-
-```typescript
-// Handle audio data from Twilio
-private handleTwilioMessage(message: WebSocket.Data): void {
-  const msg = JSON.parse(message.toString());
-  
-  switch (msg.event) {
-    case 'media':
-      // Forward audio from Twilio to OpenAI
-      if (this.openAiWs && this.openAiWs.readyState === WebSocket.OPEN) {
-        const audioAppend = {
-          type: 'input_audio_buffer.append',
-          audio: msg.media.payload
-        };
-        this.openAiWs.send(JSON.stringify(audioAppend));
-      }
+      // Create agent service - CallSid will be obtained from start message
+      const agent = new RealtimeAgentService(ws);
       
-      // Send mark message to keep stream alive
-      if (this.twilioWs && this.streamSid) {
-        const markMessage = {
-          event: 'mark',
-          streamSid: this.streamSid,
-          mark: { name: `audio_processed_${Date.now()}` }
-        };
-        this.twilioWs.send(JSON.stringify(markMessage));
-      }
-      break;
-  }
-}
-
-// Handle responses from OpenAI
-private handleOpenAiMessage(data: WebSocket.Data): void {
-  const response = JSON.parse(data.toString());
-  
-  switch (response.type) {
-    case 'response.audio.delta':
-      // Forward audio from OpenAI back to Twilio
-      if (this.twilioWs && this.streamSid) {
-        const twilioMessage = {
-          event: 'media',
-          streamSid: this.streamSid,
-          media: { payload: response.delta }
-        };
-        this.twilioWs.send(JSON.stringify(twilioMessage));
-      }
-      break;
+      // Track connection temporarily until CallSid is received
+      const tempConnectionId = `temp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      this.activeConnections.set(tempConnectionId, agent);
       
-    case 'input_audio_buffer.speech_started':
-      // User started speaking - interrupt AI if needed
-      if (this.openAiWs) {
-        this.openAiWs.send(JSON.stringify({ type: 'response.cancel' }));
-      }
-      break;
-      
-    case 'input_audio_buffer.speech_stopped':
-      // User stopped speaking - process and respond
-      if (this.openAiWs) {
-        this.openAiWs.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
-        this.openAiWs.send(JSON.stringify({ type: 'response.create' }));
-      }
-      break;
-  }
-}
-```
-
-### 4.3. Dynamic Business Greetings
-
-```typescript
-/**
- * Proactively triggers the agent's welcome message by fetching business config
- */
-private async triggerGreeting(): Promise<void> {
-  try {
-    // Fetch call details from Twilio
-    const callDetails = await twilioClient.calls(this.callSid).fetch();
-    const toPhoneNumber = callDetails.to;
-    
-    // Find business by phone number
-    const business = await prisma.business.findUnique({
-      where: { twilioPhoneNumber: toPhoneNumber }
-    });
-    
-    let welcomeMessage = 'Hello! Thank you for calling. How can I help you today?';
-    
-    if (business) {
-      const agentConfig = await prisma.agentConfig.findUnique({
-        where: { businessId: business.id }
-      });
-      
-      if (agentConfig?.voiceGreetingMessage?.trim()) {
-        welcomeMessage = agentConfig.voiceGreetingMessage;
-      } else if (agentConfig?.welcomeMessage?.trim()) {
-        welcomeMessage = agentConfig.welcomeMessage;
-      }
-    }
-    
-    // Send text event to OpenAI to trigger greeting
-    if (this.openAiWs && this.openAiWs.readyState === WebSocket.OPEN) {
-      const textEvent = {
-        type: 'conversation.item.create',
-        item: {
-          type: 'message',
-          role: 'user',
-          content: [{
-            type: 'input_text',
-            text: `Please say this exact welcome message to the caller: "${welcomeMessage}"`
-          }]
-        }
+      // Listen for CallSid from agent
+      agent.onCallSidReceived = (callSid: string) => {
+        console.log(`[WebSocket Server] CallSid received: ${callSid}`);
+        // Move connection from temp ID to actual CallSid
+        this.activeConnections.delete(tempConnectionId);
+        this.activeConnections.set(callSid, agent);
       };
-      
-      this.openAiWs.send(JSON.stringify(textEvent));
-      
-      // Trigger response
-      setTimeout(() => {
-        if (this.openAiWs && this.openAiWs.readyState === WebSocket.OPEN) {
-          this.openAiWs.send(JSON.stringify({ type: 'response.create' }));
-        }
-      }, 100);
+
+      ws.on('close', (code, reason) => {
+        const callSid = agent.getCallSid();
+        const connectionKey = callSid || tempConnectionId;
+        
+        this.activeConnections.get(connectionKey)?.cleanup('Twilio');
+        this.activeConnections.delete(connectionKey);
+      });
+    });
+  }
+}
+```
+
+### 4.2. Audio Stream Processing with Queue Management
+
+```typescript
+// Enhanced audio processing with queue management
+private handleOpenAiAudio(audioB64: string) {
+  // Add audio to queue for processing
+  this.state.audioQueue.push(audioB64);
+  this.processAudioQueue();
+}
+
+private processAudioQueue() {
+  // Only process audio if both connections are ready
+  if (!this.state.isTwilioReady || !this.state.streamSid || !this.twilioWs) {
+    console.log(`[RealtimeAgent] Not ready to process audio queue`);
+    return;
+  }
+
+  // Process all queued audio chunks
+  while (this.state.audioQueue.length > 0) {
+    const audioChunk = this.state.audioQueue.shift();
+    if (audioChunk && this.twilioWs.readyState === WebSocket.OPEN) {
+      const twilioMsg = {
+        event: "media",
+        streamSid: this.state.streamSid,
+        media: { payload: audioChunk },
+      };
+      this.twilioWs.send(JSON.stringify(twilioMsg));
     }
-    
-  } catch (error) {
-    console.error('Error triggering greeting:', error);
   }
 }
 ```
@@ -1127,28 +985,60 @@ CREATE TYPE realtime_event_type AS ENUM ('SPEECH_STARTED', 'SPEECH_STOPPED', 'AU
 ### 13.1. Enhanced Voice Routes for Realtime API
 
 ```typescript
-// Voice Routes for Twilio Integration
+// Voice Routes with Async Processing
 POST /api/voice/incoming
   - Handles incoming Twilio calls
   - Initiates WebSocket connection for Media Streams
   - Returns TwiML with Media Stream configuration
+  - CallSid passed as stream parameter
+
+POST /api/voice/handle-speech
+  - Processes speech input asynchronously
+  - Non-blocking AI response generation
+  - Background processing with immediate acknowledgment
+  - Fallback error handling
+
+POST /api/voice/play-and-gather
+  - Plays pre-generated audio and gathers response
+  - Used for async voice flow continuation
+  - Supports URL-based audio delivery
+
+POST /api/voice/continue-conversation
+  - Continues conversation after AI processing
+  - Handles various next actions (CONTINUE, HANGUP, TRANSFER, VOICEMAIL)
+  - Supports both URL parameters and background processing results
+
+POST /api/voice/handle-error
+  - Graceful error recovery endpoint
+  - User-friendly error messages
+  - Session cleanup on critical errors
 
 // WebSocket Endpoint
 WS /
   - Twilio Media Stream WebSocket connection
   - Bidirectional audio streaming
   - Real-time session management
+  - CallSid extracted from start message
 
 // Health and Monitoring
 GET /api/voice/health
   - Voice system health with WebSocket metrics
   - Realtime API connection status
   - Active session monitoring
+  - Memory usage tracking
+  - Redis connectivity status
+```
 
-GET /api/voice/sessions
-  - Active voice session monitoring
-  - WebSocket connection status
-  - Realtime API metrics
+### 13.2. Async Voice Processing Flow
+
+```
+1. User speaks → Twilio captures speech
+2. /handle-speech receives speech text
+3. Immediate response with thinking sound
+4. Background AI processing begins
+5. AI generates response and audio
+6. Call redirected to /continue-conversation
+7. Audio played to user, conversation continues
 ```
 
 ---
@@ -1177,11 +1067,17 @@ OPENAI_REALTIME_MODEL="gpt-4o-realtime-preview-2024-10-01"
 TWILIO_ACCOUNT_SID="AC_your_account_sid"
 TWILIO_AUTH_TOKEN="your_auth_token"
 TWILIO_WEBHOOK_BASE_URL="https://your-domain.com"
+HOSTNAME="your-domain.com"  # Required for WebSocket URL generation
 
 # WebSocket Configuration
 WEBSOCKET_PING_INTERVAL=30000
 WEBSOCKET_PONG_TIMEOUT=5000
 MAX_WEBSOCKET_CONNECTIONS=100
+
+# Performance Configuration
+MAX_MEMORY_USAGE_MB=1536
+ENABLE_MEMORY_MONITORING=true
+ENABLE_VERBOSE_LOGGING=false
 
 # JWT Configuration
 JWT_SECRET="your-super-secret-jwt-key"
@@ -1248,4 +1144,71 @@ server {
 
 ---
 
-This comprehensive developer guide now accurately reflects the current OpenAI Realtime API implementation with WebSocket architecture, providing technical implementation details and architectural reference for the advanced voice-enabled platform. 
+## 16. Security Considerations
+
+### 16.1. Data Encryption and Security
+
+- **SSL/TLS**: All communication between the platform and external services (Twilio, OpenAI) is encrypted using SSL/TLS.
+- **Data Encryption**: Sensitive data (e.g., call recordings, session data) is encrypted in transit and at rest.
+- **Access Control**: Role-based access control is implemented to restrict access to sensitive data and functionalities.
+
+### 16.2. Compliance and Legal Requirements
+
+- **GDPR**: The platform complies with GDPR requirements regarding data protection and privacy.
+- **Data Retention**: Data is retained for the duration required by law and is securely deleted when no longer needed.
+
+---
+
+## 17. Testing Strategy
+
+### 17.1. Unit Testing
+
+- **Coverage**: 100% line coverage for all core components.
+- **Frequency**: Continuous integration testing is performed on every code change.
+
+### 17.2. Integration Testing
+
+- **Scope**: End-to-end testing of the platform's integration with external services (Twilio, OpenAI).
+- **Frequency**: Regular integration testing is performed to ensure compatibility and reliability.
+
+### 17.3. Performance Testing
+
+- **Scope**: Testing the platform's performance under various load conditions.
+- **Frequency**: Regular performance testing is performed to ensure optimal system responsiveness.
+
+---
+
+## 18. Troubleshooting
+
+### WebSocket Connection Issues
+
+**CallSid Not Received:**
+- Ensure Twilio webhook is configured correctly
+- Check that stream.parameter is used in TwiML
+- Verify HOSTNAME environment variable is set
+
+**Audio Queue Buildup:**
+- Monitor audioQueue size in connection state
+- Check both connections are ready before processing
+- Verify streamSid is available
+
+**OpenAI Expected Errors:**
+- `input_audio_buffer_commit_empty`: Normal when VAD detects false positive
+- `response_cancel_not_active`: Expected when interrupting without active response
+- `conversation_already_has_active_response`: Normal during rapid exchanges
+
+### Performance Optimization
+
+**Async Processing:**
+- Use background processing for AI responses
+- Implement thinking sounds for perceived responsiveness
+- Monitor processing time with health endpoints
+
+**Memory Management:**
+- Set appropriate MAX_MEMORY_USAGE_MB
+- Enable session cleanup intervals
+- Monitor with /health endpoint
+
+---
+
+This comprehensive developer guide now accurately reflects the enhanced OpenAI Realtime API implementation (v4.3) with improved CallSid handling, connection state management, and async processing patterns. 

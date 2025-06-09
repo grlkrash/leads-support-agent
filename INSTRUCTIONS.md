@@ -4,8 +4,9 @@
 
 This implementation guide covers the setup and configuration of a comprehensive voice and chat-enabled AI agent platform for Small to Medium-Sized Businesses. The system includes:
 
-- **OpenAI Realtime API Integration** with bidirectional audio streaming
-- **WebSocket Architecture** for low-latency voice communication
+- **Enhanced OpenAI Realtime API Integration** with bidirectional audio streaming and improved CallSid handling
+- **Advanced WebSocket Architecture** for low-latency voice communication with audio queue management
+- **Asynchronous Voice Processing** with non-blocking AI response generation
 - **Plan Tier Architecture** (FREE, BASIC, PRO) with Realtime API access
 - **Enhanced Emergency Handling** across all channels with real-time processing
 - **Redis Session Management** with WebSocket tracking and analytics
@@ -246,11 +247,17 @@ TWILIO_ACCOUNT_SID="AC_your_twilio_account_sid"
 TWILIO_AUTH_TOKEN="your_twilio_auth_token"
 TWILIO_WEBHOOK_BASE_URL="https://your-domain.com"
 TWILIO_PHONE_NUMBER="+1234567890"
+HOSTNAME="your-domain.com" # REQUIRED for WebSocket URL generation
 
 # WebSocket Configuration
 WEBSOCKET_PING_INTERVAL=30000
 WEBSOCKET_PONG_TIMEOUT=5000
 MAX_WEBSOCKET_CONNECTIONS=100
+
+# Performance Configuration
+MAX_MEMORY_USAGE_MB=1536
+ENABLE_MEMORY_MONITORING=true
+ENABLE_VERBOSE_LOGGING=false
 
 # Email Configuration
 SMTP_HOST="smtp.ethereal.email"
@@ -286,266 +293,259 @@ const router = express.Router();
 const voiceSessionService = new VoiceSessionService();
 const aiHandler = new AIHandler();
 
-// Handle incoming calls
+// Handle incoming calls with Media Streams (Realtime API)
 router.post('/incoming', validateTwilioSignature, async (req, res) => {
-  const { CallSid, From, To } = req.body;
-  
   try {
-    // Create voice session
-    const session = await voiceSessionService.createSession(CallSid, From, To);
+    console.log('[VOICE STREAM] Incoming call received:', req.body.CallSid)
     
-    // Generate initial TwiML response
-    const twiml = new twilio.twiml.VoiceResponse();
-    const gather = twiml.gather({
-      input: 'speech',
-      action: '/api/voice/gather',
-      speechTimeout: 'auto',
-      language: 'en-US'
-    });
+    // Validate HOSTNAME environment variable
+    if (!process.env.HOSTNAME) {
+      throw new Error('HOSTNAME environment variable is required for WebSocket streaming')
+    }
     
-    gather.say({
-      voice: 'alice'
-    }, 'Hello! Thank you for calling. How can I help you today?');
+    const callSid = req.body.CallSid
     
-    res.type('text/xml');
-    res.send(twiml.toString());
+    // Create VoiceResponse for bidirectional media streaming
+    const response = new twilio.twiml.VoiceResponse()
+    const connect = response.connect()
+    
+    // Create stream connection to WebSocket server
+    const streamUrl = `wss://${process.env.HOSTNAME}/`
+    const stream = connect.stream({ url: streamUrl })
+    
+    // Add CallSid as parameter (reliable method)
+    stream.parameter({
+      name: 'callSid',
+      value: callSid
+    })
+    
+    // Add pause to keep call active
+    response.pause({ length: 14400 }) // 4 hours max
+    
+    res.type('text/xml')
+    res.send(response.toString())
+    
   } catch (error) {
-    console.error('Voice incoming error:', error);
-    res.status(500).send('Error processing call');
+    console.error('[VOICE STREAM] Error:', error)
+    // Fallback response
+    const response = new twilio.twiml.VoiceResponse()
+    response.say({ voice: 'alice' }, 'We are experiencing technical difficulties. Please try again.')
+    response.hangup()
+    res.type('text/xml')
+    res.send(response.toString())
   }
-});
+})
 
-// Process speech input
-router.post('/gather', validateTwilioSignature, async (req, res) => {
-  const { CallSid, SpeechResult } = req.body;
-  
+// Process speech input asynchronously
+router.post('/handle-speech', validateTwilioSignature, async (req, res) => {
   try {
-    // Get session
-    const session = await voiceSessionService.getSession(CallSid);
-    if (!session) {
-      throw new Error('Session not found');
+    const speechResult = req.body.SpeechResult
+    const callSid = req.body.CallSid
+    
+    // Background AI processing function
+    const processAiResponse = async () => {
+      try {
+        // Get business and process with AI
+        const business = await prisma.business.findFirst({
+          where: { twilioPhoneNumber: req.body.To }
+        })
+        
+        const session = await voiceSessionService.getSession(callSid)
+        const aiResponse = await aiHandler.processMessage(
+          speechResult,
+          session.history,
+          business.id,
+          session.currentFlow,
+          callSid
+        )
+        
+        // Generate audio URL
+        const audioUrl = await generateAudioUrl(aiResponse.reply)
+        
+        // Update live call with response
+        await twilioClient.calls(callSid).update({
+          url: `${process.env.APP_PRIMARY_URL}/api/voice/continue-conversation?audioUrl=${audioUrl}&nextAction=${aiResponse.nextAction}`,
+          method: 'POST'
+        })
+        
+      } catch (error) {
+        console.error('[AI PROCESSING] Error:', error)
+        // Redirect to error handler
+        await twilioClient.calls(callSid).update({
+          url: `${process.env.APP_PRIMARY_URL}/api/voice/handle-error`,
+          method: 'POST'
+        })
+      }
     }
     
-    // Process with AI
-    const response = await aiHandler.processMessage(
-      SpeechResult,
-      session.businessId,
-      session.messages,
-      'VOICE',
-      CallSid
-    );
+    // Start background processing (non-blocking)
+    processAiResponse().catch(console.error)
     
-    // Update session
-    await voiceSessionService.updateSession(CallSid, {
-      messages: [...session.messages, {
-        role: 'user',
-        content: SpeechResult,
-        timestamp: new Date()
-      }, {
-        role: 'assistant',
-        content: response.reply,
-        timestamp: new Date()
-      }]
-    });
+    // Respond immediately with thinking sound
+    const twiml = new twilio.twiml.VoiceResponse()
+    twiml.play(`${process.env.APP_PRIMARY_URL}/sounds/thinking-sound-fx.mp3`)
+    twiml.pause({ length: 8 })
     
-    // Generate TwiML response
-    const twiml = new twilio.twiml.VoiceResponse();
+    res.type('text/xml')
+    res.send(twiml.toString())
     
-    if (response.action === 'CONTINUE') {
-      const gather = twiml.gather({
-        input: 'speech',
-        action: '/api/voice/gather',
-        speechTimeout: 'auto'
-      });
-      gather.say({ voice: 'alice' }, response.reply);
-    } else if (response.action === 'HANGUP') {
-      twiml.say({ voice: 'alice' }, response.reply);
-      twiml.hangup();
-    }
-    
-    res.type('text/xml');
-    res.send(twiml.toString());
   } catch (error) {
-    console.error('Voice gather error:', error);
-    const twiml = new twilio.twiml.VoiceResponse();
-    twiml.say('I apologize, but I encountered an error. Please try calling again.');
-    twiml.hangup();
-    res.type('text/xml');
-    res.send(twiml.toString());
+    console.error('[HANDLE SPEECH] Error:', error)
+    // Error response
+    const twiml = new twilio.twiml.VoiceResponse()
+    twiml.say({ voice: 'alice' }, 'I apologize, but I encountered an error.')
+    twiml.hangup()
+    res.type('text/xml')
+    res.send(twiml.toString())
   }
-});
+})
 
 export default router;
 ```
 
-### 2. Implement Voice Session Service (`src/services/voiceSessionService.ts`)
+### 2. Implement Realtime Agent Service (`src/services/realtimeAgentService.ts`)
 
 ```typescript
-import Redis from 'ioredis';
-import { VoiceSession, SessionAnalytics } from '../types/voice.js';
+import WebSocket from 'ws';
+import { PrismaClient } from '@prisma/client';
 
-export class VoiceSessionService {
-  private redis: Redis;
-  private memoryStore: Map<string, VoiceSession> = new Map();
+const prisma = new PrismaClient();
 
-  constructor() {
-    this.redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+interface ConnectionState {
+  isTwilioReady: boolean;
+  isAiReady: boolean;
+  streamSid: string | null;
+  audioQueue: string[];
+}
+
+export class RealtimeAgentService {
+  private twilioWs: WebSocket | null = null;
+  private openAiWs: WebSocket | null = null;
+  private callSid: string = '';
+  private state: ConnectionState;
+  public onCallSidReceived?: (callSid: string) => void;
+
+  constructor(twilioWs: WebSocket) {
+    this.twilioWs = twilioWs;
     
-    this.redis.on('error', (error) => {
-      console.warn('Redis connection error, falling back to memory store:', error);
-    });
-  }
-
-  async createSession(callSid: string, fromNumber: string, toNumber: string): Promise<VoiceSession> {
-    const session: VoiceSession = {
-      sessionId: callSid,
-      businessId: await this.getBusinessIdFromPhone(toNumber),
-      callSid,
-      fromNumber,
-      toNumber,
-      startTime: new Date(),
-      status: 'ACTIVE',
-      messages: [],
-      intents: [],
-      entities: {
-        emails: [],
-        phones: [],
-        names: [],
-        dates: [],
-        amounts: [],
-        locations: []
-      },
-      emergencyDetected: false,
-      voiceActions: [],
-      leadCaptured: false
+    this.state = {
+      isTwilioReady: false,
+      isAiReady: false,
+      streamSid: null,
+      audioQueue: [],
     };
 
-    await this.storeSession(session);
-    return session;
+    this.setupTwilioListeners();
   }
 
-  async updateSession(sessionId: string, update: Partial<VoiceSession>): Promise<void> {
-    const session = await this.getSession(sessionId);
-    if (!session) {
-      throw new Error('Session not found');
-    }
-
-    const updatedSession = { ...session, ...update };
-    await this.storeSession(updatedSession);
-  }
-
-  async getSession(sessionId: string): Promise<VoiceSession | null> {
-    try {
-      const sessionData = await this.redis.get(`voice_session:${sessionId}`);
-      if (sessionData) {
-        return JSON.parse(sessionData);
+  private handleTwilioMessage(message: WebSocket.Data) {
+    const msg = JSON.parse(message.toString());
+    
+    if (msg.event === "start") {
+      // Extract CallSid from start message (reliable method)
+      this.callSid = msg.start.callSid;
+      
+      if (this.onCallSidReceived) {
+        this.onCallSidReceived(this.callSid);
       }
-    } catch (error) {
-      console.warn('Redis get error, checking memory store:', error);
+      
+      this.state.streamSid = msg.start.streamSid;
+      this.state.isTwilioReady = true;
+      
+      // Connect to OpenAI
+      this.connectToOpenAI();
+    } else if (msg.event === "media") {
+      // Forward audio to OpenAI
+      if (this.openAiWs?.readyState === WebSocket.OPEN) {
+        this.openAiWs.send(JSON.stringify({
+          type: 'input_audio_buffer.append',
+          audio: msg.media.payload
+        }));
+      }
     }
-
-    return this.memoryStore.get(sessionId) || null;
   }
 
-  async endSession(sessionId: string): Promise<SessionAnalytics> {
-    const session = await this.getSession(sessionId);
-    if (!session) {
-      throw new Error('Session not found');
-    }
-
-    session.status = 'COMPLETED';
-    session.endTime = new Date();
+  private async configureOpenAiSession() {
+    // Get business-specific configuration
+    const business = await this.getBusinessConfig();
     
-    const analytics: SessionAnalytics = {
-      sessionId: session.sessionId,
-      businessId: session.businessId,
-      channel: 'VOICE',
-      startTime: session.startTime,
-      endTime: session.endTime,
-      duration: session.endTime.getTime() - session.startTime.getTime(),
-      messageCount: session.messages.length,
-      intents: session.intents,
-      entities: session.entities,
-      voiceMetrics: {
-        callDuration: session.endTime.getTime() - session.startTime.getTime(),
-        voiceActions: session.voiceActions,
-        speechQuality: 0.85 // Placeholder
-      },
-      emergencyDetected: session.emergencyDetected,
-      leadCaptured: session.leadCaptured,
-      completionStatus: 'COMPLETED'
+    const sessionConfig = {
+      type: 'session.update',
+      session: {
+        modalities: ['text', 'audio'],
+        instructions: business.instructions,
+        voice: 'alloy',
+        input_audio_format: 'g711_ulaw',
+        output_audio_format: 'g711_ulaw',
+        turn_detection: {
+          type: 'server_vad',
+          threshold: 0.5,
+          prefix_padding_ms: 500,
+          silence_duration_ms: 2500 // 2.5 seconds
+        }
+      }
     };
 
-    await this.storeSession(session);
-    return analytics;
+    this.openAiWs.send(JSON.stringify(sessionConfig));
   }
 
-  private async storeSession(session: VoiceSession): Promise<void> {
-    try {
-      await this.redis.setex(
-        `voice_session:${session.sessionId}`,
-        parseInt(process.env.REDIS_TTL || '3600'),
-        JSON.stringify(session)
-      );
-    } catch (error) {
-      console.warn('Redis store error, using memory store:', error);
-      this.memoryStore.set(session.sessionId, session);
+  // Handle audio queue for buffering
+  private processAudioQueue() {
+    if (!this.state.isTwilioReady || !this.state.streamSid) return;
+
+    while (this.state.audioQueue.length > 0) {
+      const audioChunk = this.state.audioQueue.shift();
+      if (audioChunk && this.twilioWs?.readyState === WebSocket.OPEN) {
+        this.twilioWs.send(JSON.stringify({
+          event: "media",
+          streamSid: this.state.streamSid,
+          media: { payload: audioChunk },
+        }));
+      }
     }
-  }
-
-  private async getBusinessIdFromPhone(phoneNumber: string): Promise<string> {
-    // Implementation to map phone number to business ID
-    // This would query your database for the business associated with the phone number
-    return 'default-business-id'; // Placeholder
   }
 }
 ```
 
-### 3. Implement Voice Helper Utilities (`src/utils/voiceHelpers.ts`)
+### 3. Implement WebSocket Server (`src/services/websocketServer.ts`)
 
 ```typescript
-import { VoiceResponse } from '../types/voice.js';
+import WebSocket, { WebSocketServer } from 'ws';
+import { Server as HttpServer } from 'http';
+import { RealtimeAgentService } from './realtimeAgentService';
 
-export function enhancePromptForVoice(response: string, context?: any): string {
-  // Add conversational interjections
-  const interjections = ['Got it.', 'Alright.', 'Perfect.', 'I understand.'];
-  const randomInterjection = interjections[Math.floor(Math.random() * interjections.length)];
-  
-  // Apply SSML markup for natural speech
-  let enhancedResponse = response;
-  
-  // Add pauses for better speech flow
-  enhancedResponse = enhancedResponse.replace(/\. /g, '. <break time="0.5s"/> ');
-  enhancedResponse = enhancedResponse.replace(/\? /g, '? <break time="0.3s"/> ');
-  
-  // Add emphasis for important information
-  enhancedResponse = enhancedResponse.replace(/emergency/gi, '<emphasis level="strong">emergency</emphasis>');
-  enhancedResponse = enhancedResponse.replace(/urgent/gi, '<emphasis level="strong">urgent</emphasis>');
-  
-  return `${randomInterjection} <break time="0.3s"/> ${enhancedResponse}`;
-}
+export class TwilioWebSocketServer {
+  private wss: WebSocketServer;
+  private activeConnections = new Map<string, RealtimeAgentService>();
 
-export function createSSMLEmergencyMessage(emergencyDetails: any): string {
-  return `
-    <speak>
-      <emphasis level="strong">Emergency alert!</emphasis>
-      <break time="0.5s"/>
-      You have received an urgent service request.
-      <break time="0.5s"/>
-      ${emergencyDetails.description}
-      <break time="0.3s"/>
-      Customer contact: ${emergencyDetails.contact}
-      <break time="0.3s"/>
-      Please respond immediately.
-    </speak>
-  `;
-}
+  constructor(server: HttpServer) {
+    this.wss = new WebSocketServer({ server });
+    this.setupConnectionHandler();
+  }
 
-export function validateVoiceConfiguration(config: any): boolean {
-  const validVoices = ['alice', 'man', 'woman', 'polly.Amy', 'polly.Brian'];
-  const validLanguages = ['en-US', 'en-GB', 'en-AU', 'es-ES', 'fr-FR', 'de-DE'];
-  
-  return validVoices.includes(config.voice) && validLanguages.includes(config.language);
+  private setupConnectionHandler() {
+    this.wss.on('connection', (ws: WebSocket) => {
+      const agent = new RealtimeAgentService(ws);
+      
+      // Temporary connection ID until CallSid is received
+      const tempId = `temp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      this.activeConnections.set(tempId, agent);
+      
+      // Listen for CallSid
+      agent.onCallSidReceived = (callSid: string) => {
+        // Move from temp ID to actual CallSid
+        this.activeConnections.delete(tempId);
+        this.activeConnections.set(callSid, agent);
+      };
+
+      ws.on('close', () => {
+        const callSid = agent.getCallSid();
+        const key = callSid || tempId;
+        this.activeConnections.get(key)?.cleanup();
+        this.activeConnections.delete(key);
+      });
+    });
+  }
 }
 ```
 
@@ -996,6 +996,7 @@ export NODE_ENV=production
 export DATABASE_URL="postgresql://prod_user:prod_pass@prod_host:5432/prod_db"
 export REDIS_URL="redis://prod_redis:6379"
 export TWILIO_WEBHOOK_BASE_URL="https://your-production-domain.com"
+export HOSTNAME="your-production-domain.com" # REQUIRED for WebSocket
 
 # Run production migrations
 npx prisma migrate deploy
@@ -1008,23 +1009,34 @@ npm start
 
 Configure Twilio webhooks to point to your production endpoints:
 - Incoming calls: `https://your-domain.com/api/voice/incoming`
-- Gather endpoint: `https://your-domain.com/api/voice/gather`
+- Status callback: `https://your-domain.com/api/voice/status`
 
-### 3. Health Monitoring
+### 3. WebSocket Configuration
+
+Ensure your production environment supports WebSocket connections:
+- SSL certificates configured for WSS
+- Firewall rules allow WebSocket traffic
+- Load balancer supports WebSocket sticky sessions
+
+### 4. Health Monitoring
 
 ```bash
 # Check system health
 curl https://your-domain.com/health | jq
 
+# Monitor WebSocket connections
+curl https://your-domain.com/health | jq '.webSocket'
+
 # Monitor Redis sessions
-curl https://your-domain.com/health | jq '.metrics.active_sessions'
+curl https://your-domain.com/health | jq '.sessions'
 ```
 
 ## Success Metrics & Monitoring
 
-- **Voice System**: Call completion rates, transcription accuracy, response times
+- **Voice System**: Call completion rates, transcription accuracy, response times, async processing latency
+- **WebSocket Performance**: Connection stability, audio quality metrics, CallSid association success rate
 - **Plan Tiers**: Feature adoption rates, upgrade conversion, plan-specific usage
 - **Emergency System**: Emergency detection accuracy, response times, false positive rates
 - **Overall Performance**: Session analytics, lead conversion rates, system uptime
 
-This comprehensive implementation guide now covers all aspects of the enhanced voice-enabled, plan-tier based AI agent platform with sophisticated emergency handling and analytics capabilities. 
+This comprehensive implementation guide now covers all aspects of the enhanced voice-enabled, plan-tier based AI agent platform with asynchronous processing, improved connection management, and sophisticated emergency handling capabilities. 
